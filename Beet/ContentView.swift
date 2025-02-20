@@ -1,125 +1,282 @@
 import SwiftUI
-import AVFoundation
 
 struct ContentView: View {
-    @State private var bpm: Int = 120
-    @State private var isTunerVisible: Bool = false
-    @State private var aFrequency: Double = 440.0
+    @StateObject private var settings = Settings()
+    @State private var isTunerVisible = false
+    @State private var showingSettings = false
+    @StateObject private var audioEngine = AudioEngine()
+    @State private var isPlaying = false
     
     var body: some View {
         ZStack {
             if isTunerVisible {
-                TunerView(aFrequency: $aFrequency, isTunerVisible: $isTunerVisible)
+                TunerView(
+                    aFrequency: .init(
+                        get: { settings.referenceFrequency },
+                        set: { settings.referenceFrequency = $0 }
+                    ),
+                    isTunerVisible: $isTunerVisible,
+                    audioEngine: audioEngine
+                )
             } else {
-                MetronomeView(bpm: $bpm, isTunerVisible: $isTunerVisible)
+                MetronomeView(
+                    settings: settings,
+                    audioEngine: audioEngine,
+                    isPlaying: $isPlaying,
+                    isTunerVisible: $isTunerVisible,
+                    showingSettings: $showingSettings
+                )
             }
         }
         .animation(.easeInOut, value: isTunerVisible)
+        .preferredColorScheme(settings.colorScheme == .system ? nil :
+            settings.colorScheme == .dark ? .dark : .light)
     }
 }
 
 struct MetronomeView: View {
-    @Binding var bpm: Int
+    @ObservedObject var settings: Settings
+    @ObservedObject var audioEngine: AudioEngine
+    @Binding var isPlaying: Bool
     @Binding var isTunerVisible: Bool
-    @State private var isPlaying: Bool = false
-    @State private var timer: Timer? = nil
+    @Binding var showingSettings: Bool
+    @State private var isEditingBPM = false
+    @State private var showingTimeSignaturePicker = false
+    @State private var showingSubdivisionPicker = false
+    @State private var bpmText: String = ""
+    @State private var tunerEnabled = false
+    @State private var bpmTimer: Timer?
+    @State private var bpmChangeInterval: TimeInterval = 0.1
     
     var body: some View {
-        VStack {
+        VStack(spacing: 0) {
+            // Top Bar
             HStack {
-                Spacer()
                 Button(action: {
                     isTunerVisible.toggle()
                 }) {
-                    Image(systemName: "line.horizontal.3")
-                        .font(.title)
-                        .padding()
-                }
-            }
-            Spacer()
-            ZStack {
-                Circle()
-                    .stroke(Color.gray.opacity(0.2), lineWidth: 20)
-                    .frame(width: 250, height: 250)
-                Text("\(bpm) BPM")
-                    .font(.largeTitle)
-                    .bold()
-                Circle()
-                    .trim(from: 0, to: 0.01)
-                    .stroke(Color.blue, lineWidth: 20)
-                    .frame(width: 250, height: 250)
-                    .rotationEffect(Angle(degrees: Double(bpm) * 3))
-                    .gesture(DragGesture()
-                                .onChanged { value in
-                                    let newBpm = Int(value.translation.width / 2) + bpm
-                                    bpm = max(40, min(newBpm, 240))
-                                })
-            }
-            Spacer()
-        }
-        .onDisappear {
-            stopMetronome()
-        }
-    }
-    
-    private func stopMetronome() {
-        timer?.invalidate()
-        timer = nil
-    }
-}
-
-struct TunerView: View {
-    @Binding var aFrequency: Double
-    @Binding var isTunerVisible: Bool
-    @State private var audioPlayer: AVAudioPlayer?
-    
-    var body: some View {
-        VStack {
-            HStack {
-                Spacer()
-                Button(action: {
-                    isTunerVisible.toggle()
-                }) {
-                    Image(systemName: "line.horizontal.3")
-                        .font(.title)
-                        .padding()
-                }
-            }
-            Spacer()
-            VStack(spacing: 40) {
-                HStack {
-                    Text("A Frequency: ")
-                    TextField("Frequency", value: $aFrequency, formatter: NumberFormatter())
-                        .keyboardType(.decimalPad)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .frame(width: 100)
-                }
-                Button(action: playTone) {
                     Image(systemName: "tuningfork")
-                        .font(.largeTitle)
-                        .padding()
+                        .font(.title)
+                }
+                .padding(.leading, 20)
+                
+                Spacer()
+                
+                Button(action: {
+                    showingSettings = true
+                }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.title)
+                }
+                .padding(.trailing, 20)
+            }
+            .padding(.top, 8)
+            
+            TunerMeterView(isEnabled: $tunerEnabled)
+                .frame(height: 160)
+                .padding(.top, 20)
+                .padding(.horizontal)
+            
+            Spacer()
+            
+            // Time Signature and Subdivision
+            HStack(spacing: 50) {
+                Button(action: {
+                    showingTimeSignaturePicker = true
+                }) {
+                    Text("\(settings.beatsPerMeasure)/\(settings.beatUnit)")
+                        .font(.title2)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.gray.opacity(0.15))
+                        .clipShape(Capsule())
+                }
+                
+                Button(action: {
+                    showingSubdivisionPicker = true
+                }) {
+                    Image(systemName: "music.note.list")
+                        .font(.title2)
+                        .padding(14)
+                        .background(Color.gray.opacity(0.15))
+                        .clipShape(Circle())
                 }
             }
-            Spacer()
+            .padding(.bottom, 20)
+            
+            // BPM Controls
+            VStack(spacing: 20) {
+                // Up Arrow with long press
+                Button(action: {}) {
+                    Image(systemName: "chevron.up.circle.fill")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundStyle(Color(white: 0.7))
+                        .frame(width: 60, height: 60)
+                        .background(
+                            Circle()
+                                .fill(Color.gray.opacity(0.1))
+                                .shadow(color: .gray.opacity(0.15), radius: 8, x: 0, y: 4)
+                        )
+                }
+                .buttonStyle(PressableButtonStyle())
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.3)
+                        .onEnded { _ in
+                            // Start continuous increase
+                            bpmTimer = Timer.scheduledTimer(withTimeInterval: bpmChangeInterval, repeats: true) { _ in
+                                let newBPM = min(240, settings.bpm + 1)
+                                settings.bpm = newBPM
+                                if isPlaying {
+                                    audioEngine.updateBPMWithPause(
+                                        newBPM,
+                                        beatsPerMeasure: settings.beatsPerMeasure,
+                                        subdivision: settings.subdivision
+                                    )
+                                }
+                            }
+                        }
+                )
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onEnded { _ in
+                            // Stop continuous increase
+                            bpmTimer?.invalidate()
+                            bpmTimer = nil
+                        }
+                )
+                .onTapGesture {
+                    let newBPM = min(240, settings.bpm + 1)
+                    settings.bpm = newBPM
+                    if isPlaying {
+                        audioEngine.updateBPMWithPause(
+                            newBPM,
+                            beatsPerMeasure: settings.beatsPerMeasure,
+                            subdivision: settings.subdivision
+                        )
+                    }
+                }
+                
+                // BPM Display - now display only
+                Text("\(settings.bpm)")
+                    .font(.system(size: 56, weight: .bold))
+                    .foregroundColor(.primary)
+                    .frame(height: 66)
+                
+                // Down Arrow with long press
+                Button(action: {}) {
+                    Image(systemName: "chevron.down.circle.fill")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundStyle(Color(white: 0.7))
+                        .frame(width: 60, height: 60)
+                        .background(
+                            Circle()
+                                .fill(Color.gray.opacity(0.1))
+                                .shadow(color: .gray.opacity(0.15), radius: 8, x: 0, y: 4)
+                        )
+                }
+                .buttonStyle(PressableButtonStyle())
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.3)
+                        .onEnded { _ in
+                            // Start continuous decrease
+                            bpmTimer = Timer.scheduledTimer(withTimeInterval: bpmChangeInterval, repeats: true) { _ in
+                                let newBPM = max(40, settings.bpm - 1)
+                                settings.bpm = newBPM
+                                if isPlaying {
+                                    audioEngine.updateBPMWithPause(
+                                        newBPM,
+                                        beatsPerMeasure: settings.beatsPerMeasure,
+                                        subdivision: settings.subdivision
+                                    )
+                                }
+                            }
+                        }
+                )
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onEnded { _ in
+                            // Stop continuous decrease
+                            bpmTimer?.invalidate()
+                            bpmTimer = nil
+                        }
+                )
+                .onTapGesture {
+                    let newBPM = max(40, settings.bpm - 1)
+                    settings.bpm = newBPM
+                    if isPlaying {
+                        audioEngine.updateBPMWithPause(
+                            newBPM,
+                            beatsPerMeasure: settings.beatsPerMeasure,
+                            subdivision: settings.subdivision
+                        )
+                    }
+                }
+            }
+            .padding(.vertical, 16)
+            
+            // Play/Pause and Tap Tempo
+            HStack(spacing: 50) {
+                Button(action: {
+                    isPlaying.toggle()
+                    if isPlaying {
+                        audioEngine.playMetronomeClick(
+                            bpm: settings.bpm,
+                            beatsPerMeasure: settings.beatsPerMeasure,
+                            subdivision: settings.subdivision
+                        )
+                    } else {
+                        audioEngine.stop()
+                    }
+                }) {
+                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 54))
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(PressableButtonStyle())
+                
+                TapTempoButton(
+                    bpm: $settings.bpm,
+                    isPlaying: isPlaying,
+                    audioEngine: audioEngine,
+                    settings: settings
+                )
+            }
+            .padding(.bottom, 25)
         }
-    }
-    
-    private func playTone() {
-        guard let url = Bundle.main.url(forResource: "tuning_fork", withExtension: "wav") else { return }
-        do {
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.play()
-        } catch {
-            print("Error playing tone: \(error)")
+        .padding(.horizontal, 24)
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(isShowing: $showingSettings, settings: settings)
         }
-    }
-}
-
-@main
-struct MetronomeTunerApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
+        .sheet(isPresented: $showingTimeSignaturePicker) {
+            TimeSignaturePickerView(
+                isShowing: $showingTimeSignaturePicker,
+                numerator: $settings.beatsPerMeasure,
+                denominator: $settings.beatUnit,
+                onTimeSignatureChange: { num, den in
+                    if isPlaying {
+                        audioEngine.updateTimeSignature(
+                            bpm: settings.bpm,
+                            beatsPerMeasure: num,
+                            subdivision: settings.subdivision
+                        )
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $showingSubdivisionPicker) {
+            SubdivisionPickerView(
+                isShowing: $showingSubdivisionPicker,
+                subdivision: $settings.subdivision,
+                onSubdivisionChange: { newSubdivision in
+                    if isPlaying {
+                        audioEngine.updateTimeSignature(
+                            bpm: settings.bpm,
+                            beatsPerMeasure: settings.beatsPerMeasure,
+                            subdivision: newSubdivision
+                        )
+                    }
+                }
+            )
         }
     }
 }
